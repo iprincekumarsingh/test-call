@@ -1,55 +1,105 @@
+// Required modules
 const express = require('express');
 const http = require('http');
-const socketIO = require('socket.io');
+const { Server } = require("socket.io");
 
+// Setup express app and server
 const app = express();
 const server = http.createServer(app);
-const io = socketIO(server);
+const io = new Server(server);
 
-let waitingUser = null; // Store the waiting user
+// Store for waiting user in matchmaking
+let waitingUser = null;
 
+// Middleware for socket authentication and user setup
+io.use((socket, next) => {
+    if (socket.handshake.query && socket.handshake.query.callerId) {
+        socket.user = socket.handshake.query.callerId;
+        next();
+    } else {
+        next(new Error("Authentication error"));
+    }
+});
+
+// Handle user connections
 io.on('connection', (socket) => {
-    console.log('New user connected:', socket.id);
+    console.log('User connected:', socket.user);
 
-    // When a user wants to join the matchmaking queue
+    // User joins their own room based on their ID
+    socket.join(socket.user);
+
+    // Matchmaking queue join request
     socket.on('join', () => {
         if (waitingUser) {
-            // If there's already a user waiting, pair them
-            const roomId = `${waitingUser}-${socket.id}`;
+            // Pair with the waiting user
+            const roomId = `${waitingUser}-${socket.user}`;
             
-            // Let both users join the same room
+            // Both users join the same room
             socket.join(roomId);
-            io.to(waitingUser).emit('match', roomId);  // Notify the first user of the match
-            io.to(socket.id).emit('match', roomId);    // Notify the second user of the match
-
+            io.to(waitingUser).emit('match', roomId);
+            io.to(socket.user).emit('match', roomId);
             console.log(`Room created: ${roomId}`);
-            
+
             // Clear the waiting user
             waitingUser = null;
         } else {
-            // If no one is waiting, mark this user as waiting
-            waitingUser = socket.id;
+            // No user waiting, set this user as waiting
+            waitingUser = socket.user;
             console.log('User waiting:', waitingUser);
         }
     });
 
-    // Handle WebRTC signaling (e.g., offer/answer exchange)
+    // Handle WebRTC signaling (offer/answer exchange)
     socket.on('signal', (data) => {
         io.to(data.to).emit('signal', {
-            from: socket.id,
+            from: socket.user,
             signal: data.signal,
         });
     });
 
-    // When a user disconnects
+    // Handle incoming call
+    socket.on('call', (data) => {
+        let calleeId = data.calleeId;
+        let rtcMessage = data.rtcMessage;
+
+        socket.to(calleeId).emit("newCall", {
+            callerId: socket.user,
+            rtcMessage: rtcMessage,
+        });
+    });
+
+    // Handle call answer
+    socket.on('answerCall', (data) => {
+        let callerId = data.callerId;
+        let rtcMessage = data.rtcMessage;
+
+        socket.to(callerId).emit('callAnswered', {
+            callee: socket.user,
+            rtcMessage: rtcMessage,
+        });
+    });
+
+    // Handle ICE candidate exchange
+    socket.on('ICEcandidate', (data) => {
+        let calleeId = data.calleeId;
+        let rtcMessage = data.rtcMessage;
+
+        socket.to(calleeId).emit('ICEcandidate', {
+            sender: socket.user,
+            rtcMessage: rtcMessage,
+        });
+    });
+
+    // Handle disconnection
     socket.on('disconnect', () => {
-        console.log('User disconnected:', socket.id);
-        if (waitingUser === socket.id) {
-            waitingUser = null; // Clear waiting user if the user disconnects
+        console.log('User disconnected:', socket.user);
+        if (waitingUser === socket.user) {
+            waitingUser = null; // Clear waiting user if they disconnect
         }
     });
 });
 
+// Start the server
 server.listen(3002, () => {
-    console.log('Signaling server running on port 3000');
+    console.log('Signaling server running on port 3002');
 });
